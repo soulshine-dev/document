@@ -1,0 +1,107 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return signedIn() && (
+        request.auth.token.admin == true ||
+        request.auth.token.email in [
+          "niyonshutiobed01@gmail.com"
+        ]
+      );
+    }
+
+    function hasValidDocumentId(diplomaId) {
+      return diplomaId.matches('^[A-Za-z0-9][A-Za-z0-9_-]{2,63}$');
+    }
+
+    function isSafeString(value, minLen, maxLen) {
+      return value is string && value.size() >= minLen && value.size() <= maxLen;
+    }
+
+    function isIsoDate(value) {
+      return isSafeString(value, 10, 10) && value.matches('^\\d{4}-\\d{2}-\\d{2}$');
+    }
+
+    function hasAllowedKeys() {
+      return request.resource.data.keys().hasOnly([
+        "documentType",
+        "holderName",
+        "studentNumber",
+        "degree",
+        "program",
+        "faculty",
+        "issuedOn",
+        "deliveryMode",
+        "status",
+        "revokedReason"
+      ]);
+    }
+
+    function hasRequiredKeys() {
+      return request.resource.data.keys().hasAll([
+        "documentType",
+        "holderName",
+        "studentNumber",
+        "program",
+        "faculty",
+        "issuedOn",
+        "deliveryMode",
+        "status"
+      ]);
+    }
+
+    function hasValidCommonFields() {
+      return (
+        isSafeString(request.resource.data.holderName, 1, 120) &&
+        isSafeString(request.resource.data.studentNumber, 1, 80) &&
+        isSafeString(request.resource.data.program, 1, 120) &&
+        isSafeString(request.resource.data.faculty, 1, 120) &&
+        isIsoDate(request.resource.data.issuedOn) &&
+        request.resource.data.deliveryMode in ["Traditional Education", "Webinar"]
+      );
+    }
+
+    function hasValidDocumentTypeFields() {
+      return (
+        request.resource.data.documentType == "Diploma" &&
+        isSafeString(request.resource.data.degree, 1, 120)
+      ) || (
+        request.resource.data.documentType == "Transcript" &&
+        !("degree" in request.resource.data)
+      );
+    }
+
+    function hasValidStatusFields() {
+      return request.resource.data.status in ["valid", "revoked"] && (
+        (
+          request.resource.data.status == "valid" &&
+          !("revokedReason" in request.resource.data)
+        ) || (
+          request.resource.data.status == "revoked" &&
+          isSafeString(request.resource.data.revokedReason, 3, 240)
+        )
+      );
+    }
+
+    function isValidDiplomaPayload(diplomaId) {
+      return (
+        hasValidDocumentId(diplomaId) &&
+        hasAllowedKeys() &&
+        hasRequiredKeys() &&
+        hasValidCommonFields() &&
+        hasValidDocumentTypeFields() &&
+        hasValidStatusFields()
+      );
+    }
+
+    match /diplomas/{diplomaId} {
+      allow read: if true;
+      allow create, update: if isAdmin() && isValidDiplomaPayload(diplomaId);
+      allow delete: if isAdmin();
+    }
+  }
+}
