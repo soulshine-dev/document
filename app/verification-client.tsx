@@ -2,7 +2,7 @@
 
 import { FormEvent, useCallback, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { doc, getDoc } from "firebase/firestore/lite";
+import { addDoc, collection, doc, getDoc } from "firebase/firestore/lite";
 import Image from "next/image";
 import { db } from "@/lib/firebase";
 import { normalizeDeliveryMode, normalizeDocumentType } from "@/lib/record-normalizers";
@@ -10,6 +10,67 @@ import { isValidDiplomaId, normalizeDiplomaId } from "@/lib/validation";
 import type { DiplomaRecord } from "@/lib/types";
 
 type LoadState = "idle" | "loading" | "done";
+type VerificationResult = "found" | "not_found" | "error" | "invalid" | "event";
+type EventType = "verification" | "page_view" | "search_submit";
+
+type IpInfo = {
+  ip?: string;
+  city?: string;
+  region?: string;
+  country?: string;
+  latitude?: number;
+  longitude?: number;
+};
+
+async function fetchIpInfo(timeoutMs = 4000): Promise<IpInfo> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch("https://ipapi.co/json/", { signal: controller.signal });
+    if (!response.ok) return {};
+    const data = (await response.json()) as Record<string, unknown>;
+    return {
+      ip: typeof data.ip === "string" ? data.ip : undefined,
+      city: typeof data.city === "string" ? data.city : undefined,
+      region: typeof data.region === "string" ? data.region : undefined,
+      country: typeof data.country_name === "string" ? data.country_name : undefined,
+      latitude: typeof data.latitude === "number" ? data.latitude : undefined,
+      longitude: typeof data.longitude === "number" ? data.longitude : undefined
+    };
+  } catch {
+    return {};
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function logVerificationAttempt(
+  diplomaId: string,
+  result: VerificationResult,
+  eventType: EventType,
+  ipInfo?: IpInfo
+): Promise<void> {
+  try {
+    const resolvedInfo = ipInfo ?? (await fetchIpInfo());
+    const payload = {
+      diplomaId,
+      result,
+      eventType,
+      ip: resolvedInfo.ip ?? "",
+      city: resolvedInfo.city ?? "",
+      region: resolvedInfo.region ?? "",
+      country: resolvedInfo.country ?? "",
+      latitude: typeof resolvedInfo.latitude === "number" ? resolvedInfo.latitude : null,
+      longitude: typeof resolvedInfo.longitude === "number" ? resolvedInfo.longitude : null,
+      userAgent: typeof navigator !== "undefined" ? navigator.userAgent : "",
+      createdAt: new Date().toISOString()
+    };
+    await addDoc(collection(db, "verification_logs"), payload);
+  } catch {
+    // Swallow logging errors to avoid blocking verification flow.
+  }
+}
 
 function normalizeDiploma(id: string, raw: Record<string, unknown>): DiplomaRecord {
   return {
@@ -51,6 +112,7 @@ export default function VerificationClient() {
       setNotFound(false);
       setError("Invalid document ID format.");
       setState("done");
+      void logVerificationAttempt(normalizedId, "invalid", "verification");
       return;
     }
 
@@ -65,6 +127,7 @@ export default function VerificationClient() {
         setRecord(null);
         setNotFound(true);
         setState("done");
+        void logVerificationAttempt(normalizedId, "not_found", "verification");
         return;
       }
 
@@ -72,11 +135,13 @@ export default function VerificationClient() {
       setRecord(normalizeDiploma(snapshot.id, data));
       setNotFound(false);
       setState("done");
+      void logVerificationAttempt(normalizedId, "found", "verification");
     } catch (caught) {
       setRecord(null);
       setNotFound(false);
       setState("done");
       setError(caught instanceof Error ? caught.message : "Unknown error while reading Firestore");
+      void logVerificationAttempt(normalizedId, "error", "verification");
     }
   }, []);
 
@@ -118,7 +183,7 @@ export default function VerificationClient() {
 
   function valueOrDash(value: string): string {
     const trimmed = value.trim();
-    return trimmed.length > 0 ? trimmed : "—";
+    return trimmed.length > 0 ? trimmed : "-";
   }
 
   return (
@@ -206,7 +271,7 @@ export default function VerificationClient() {
             <span className="record-name">Document Type:</span>
             <span className="record-separator" />
             <span className={`record-data ${!hasRecord ? "record-placeholder" : ""}`}>
-              {hasRecord ? shown.documentType : "—"}
+              {hasRecord ? shown.documentType : "-"}
             </span>
           </div>
           <div className="record-row">
@@ -257,7 +322,7 @@ export default function VerificationClient() {
             <span className="record-name">Delivery Mode:</span>
             <span className="record-separator" />
             <span className={`record-data ${!hasRecord ? "record-placeholder" : ""}`}>
-              {hasRecord ? shown.deliveryMode : "—"}
+              {hasRecord ? shown.deliveryMode : "-"}
             </span>
           </div>
         </div>
@@ -272,3 +337,11 @@ export default function VerificationClient() {
     </div>
   );
 }
+
+
+
+
+
+
+
+

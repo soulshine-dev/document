@@ -1,8 +1,8 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { onAuthStateChanged, signInWithEmailAndPassword, signOut, User } from "firebase/auth";
-import { doc, getDoc, setDoc } from "firebase/firestore/lite";
+import { collection, doc, getDoc, getDocs, limit, query, setDoc, where } from "firebase/firestore/lite";
 import QRCode from "qrcode";
 import Image from "next/image";
 import { auth, db } from "@/lib/firebase";
@@ -24,6 +24,21 @@ type AdminForm = {
   deliveryMode: DeliveryMode;
   status: DiplomaStatus;
   revokedReason: string;
+};
+
+type VerificationLog = {
+  id: string;
+  diplomaId: string;
+  result: string;
+  eventType: string;
+  ip: string;
+  city: string;
+  region: string;
+  country: string;
+  latitude: number | null;
+  longitude: number | null;
+  userAgent: string;
+  createdAt: string;
 };
 
 function emptyForm(): AdminForm {
@@ -72,6 +87,28 @@ function normalizeRecord(id: string, raw: Record<string, unknown>): DiplomaRecor
     status: raw.status === "revoked" ? "revoked" : "valid",
     revokedReason: raw.revokedReason ? String(raw.revokedReason) : undefined
   };
+}
+
+function normalizeLog(id: string, raw: Record<string, unknown>): VerificationLog {
+  return {
+    id,
+    diplomaId: String(raw.diplomaId ?? ""),
+    result: String(raw.result ?? ""),
+    eventType: String(raw.eventType ?? ""),
+    ip: String(raw.ip ?? ""),
+    city: String(raw.city ?? ""),
+    region: String(raw.region ?? ""),
+    country: String(raw.country ?? ""),
+    latitude: typeof raw.latitude === "number" ? raw.latitude : null,
+    longitude: typeof raw.longitude === "number" ? raw.longitude : null,
+    userAgent: String(raw.userAgent ?? ""),
+    createdAt: String(raw.createdAt ?? "")
+  };
+}
+
+function formatLocation(log: VerificationLog): string {
+  const parts = [log.city, log.region, log.country].map((part) => part.trim()).filter(Boolean);
+  return parts.length > 0 ? parts.join(", ") : "-";
 }
 
 async function withTimeout<T>(operation: Promise<T>, timeoutMs: number, label: string): Promise<T> {
@@ -143,6 +180,10 @@ export default function AdminPage() {
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<"records" | "logs">("records");
+  const [logs, setLogs] = useState<VerificationLog[]>([]);
+  const [logsLoading, setLogsLoading] = useState(false);
+  const [logsError, setLogsError] = useState<string | null>(null);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
@@ -160,6 +201,41 @@ export default function AdminPage() {
   }, [form.diplomaId]);
 
   const isTranscript = form.documentType === "Transcript";
+
+  const loadLogs = useCallback(async () => {
+    if (!user) {
+      setLogsError("Sign in first.");
+      return;
+    }
+
+    setLogsLoading(true);
+    setLogsError(null);
+    try {
+      const diplomaId = normalizeDiplomaId(form.diplomaId);
+      const shouldFilter = Boolean(diplomaId && isValidDiplomaId(diplomaId));
+      const logsQuery = shouldFilter
+        ? query(collection(db, "verification_logs"), where("diplomaId", "==", diplomaId), limit(50))
+        : query(collection(db, "verification_logs"), limit(50));
+
+      const snapshot = await runWithRetry(
+        () => withTimeout(getDocs(logsQuery), FIRESTORE_TIMEOUT_MS, "Firestore read"),
+        1
+      );
+      const items = snapshot.docs.map((docSnap) => normalizeLog(docSnap.id, docSnap.data() as Record<string, unknown>));
+      items.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+      setLogs(items);
+    } catch (caught) {
+      setLogsError(explainFirebaseError(caught));
+    } finally {
+      setLogsLoading(false);
+    }
+  }, [user, form.diplomaId]);
+
+  useEffect(() => {
+    if (user && activeTab === "logs") {
+      void loadLogs();
+    }
+  }, [user, activeTab, loadLogs]);
 
   function update<K extends keyof AdminForm>(key: K, value: AdminForm[K]) {
     setForm((prev) => ({ ...prev, [key]: value }));
@@ -208,8 +284,7 @@ export default function AdminPage() {
     setLoading(true);
     try {
       const snapshot = await runWithRetry(
-        () =>
-          withTimeout(getDoc(doc(db, "diplomas", diplomaId)), FIRESTORE_TIMEOUT_MS, "Firestore read"),
+        () => withTimeout(getDoc(doc(db, "diplomas", diplomaId)), FIRESTORE_TIMEOUT_MS, "Firestore read"),
         1
       );
       if (!snapshot.exists()) {
@@ -443,6 +518,17 @@ export default function AdminPage() {
       </section>
 
       {user && (
+        <div className="row">
+          <button type="button" onClick={() => setActiveTab("records")} disabled={activeTab === "records"}>
+            Records
+          </button>
+          <button type="button" onClick={() => setActiveTab("logs")} disabled={activeTab === "logs"}>
+            View Logs
+          </button>
+        </div>
+      )}
+
+      {user && activeTab === "records" && (
         <form className="card stack" onSubmit={onLoadById}>
           <h2>Load by ID</h2>
           <div className="row">
@@ -459,7 +545,7 @@ export default function AdminPage() {
         </form>
       )}
 
-      {user && (
+      {user && activeTab === "records" && (
         <form className="card stack" onSubmit={onSave}>
           <h2>Edit Diploma Record</h2>
 
@@ -566,7 +652,7 @@ export default function AdminPage() {
         </form>
       )}
 
-      {user && (
+      {user && activeTab === "records" && (
         <section className="card stack">
           <h2>Verification QR</h2>
           <p>
@@ -595,8 +681,71 @@ export default function AdminPage() {
         </section>
       )}
 
+      {user && activeTab === "logs" && (
+        <section className="card stack">
+          <h2>Verification Logs</h2>
+          <p>Showing the most recent 50 logs. Enter a Diploma ID to filter.</p>
+          <div className="row">
+            <input
+              className="id-input"
+              placeholder="Diploma ID (optional filter)"
+              value={form.diplomaId}
+              onChange={(event) => update("diplomaId", event.target.value)}
+            />
+            <button type="button" onClick={loadLogs} disabled={logsLoading}>
+              {logsLoading ? "Loading..." : "Refresh"}
+            </button>
+          </div>
+          {logsError && <p className="invalid">{logsError}</p>}
+          {!logsLoading && logs.length === 0 && <p>No logs found yet.</p>}
+          <div className="stack">
+            {logs.map((log) => (
+              <div key={log.id} className="card">
+                <div className="grid">
+                  <p>
+                    <strong>Diploma ID:</strong> {log.diplomaId || "-"}
+                  </p>
+                  <p>
+                    <strong>Event:</strong> {log.eventType || "-"}
+                  </p>
+                  <p>
+                    <strong>Result:</strong> {log.result || "-"}
+                  </p>
+                  <p>
+                    <strong>Time:</strong> {log.createdAt || "-"}
+                  </p>
+                  <p>
+                    <strong>IP:</strong> {log.ip || "-"}
+                  </p>
+                  <p>
+                    <strong>Location:</strong> {formatLocation(log)}
+                  </p>
+                  <p>
+                    <strong>Coordinates:</strong>{" "}
+                    {log.latitude != null && log.longitude != null
+                      ? `${log.latitude}, ${log.longitude}`
+                      : "-"}
+                  </p>
+                  <p>
+                    <strong>User Agent:</strong> {log.userAgent || "-"}
+                  </p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+
+
+
       {message && <section className="card valid">{message}</section>}
       {error && <section className="card invalid">{error}</section>}
     </div>
   );
 }
+
+
+
+
+
+

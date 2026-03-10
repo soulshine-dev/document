@@ -98,6 +98,59 @@ service cloud.firestore {
       );
     }
 
+    function isIsoDateTime(value) {
+      return isSafeString(value, 20, 40) && value.matches('^\\d{4}-\\d{2}-\\d{2}T');
+    }
+
+    function isNullableNumber(value) {
+      return value is number || value == null;
+    }
+
+    function hasValidLogKeys() {
+      return request.resource.data.keys().hasOnly([
+        "diplomaId",
+        "result",
+        "eventType",
+        "ip",
+        "city",
+        "region",
+        "country",
+        "latitude",
+        "longitude",
+        "userAgent",
+        "createdAt"
+      ]);
+    }
+
+    function hasValidLogFields() {
+  return (
+    hasValidDocumentId(request.resource.data.diplomaId) &&
+    request.resource.data.result in ["found", "not_found", "error", "invalid", "event"] &&
+    request.resource.data.eventType in ["verification", "page_view", "search_submit"] &&
+    isSafeString(request.resource.data.createdAt, 20, 40) &&
+    isSafeString(request.resource.data.ip, 0, 45) &&
+    isSafeString(request.resource.data.city, 0, 120) &&
+    isSafeString(request.resource.data.region, 0, 120) &&
+    isSafeString(request.resource.data.country, 0, 120) &&
+    isSafeString(request.resource.data.userAgent, 0, 320) &&
+    isNullableNumber(request.resource.data.latitude) &&
+    isNullableNumber(request.resource.data.longitude)
+  );
+}
+
+function isValidLogPayload() {
+      return hasValidLogKeys() &&
+        request.resource.data.keys().hasAll(["diplomaId", "result", "eventType", "createdAt"]) &&
+        hasValidLogFields();
+    }
+
+    match /verification_logs/{logId} {
+      allow read: if isAdmin();
+      allow create: if isValidLogPayload();
+      allow update: if false;
+      allow delete: if isAdmin();
+    }
+
     match /diplomas/{diplomaId} {
       allow read: if true;
       allow create, update: if isAdmin() && isValidDiplomaPayload(diplomaId);
@@ -105,3 +158,8 @@ service cloud.firestore {
     }
   }
 }
+
+
+
+
+
