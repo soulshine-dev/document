@@ -4,6 +4,8 @@ out
 dist
 .firebase
 firebase-debug.log
+.next-dev*.log
+.next-dev*.err.log
 *.tsbuildinfo
 .env.local
 .env
